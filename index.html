@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#10161d">
+<title>Leaf classifier — live camera</title>
+<style>
+  :root {
+    --bg: #10161d; --card: #18212b; --line: #2a3644; --ink: #e8eef4;
+    --dim: #93a3b3; --accent: #46c07a; --warn: #e0a03c; --bad: #e05c5c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 0 0 env(safe-area-inset-bottom);
+  }
+  main { max-width: 620px; margin: 0 auto; padding: 16px 16px 40px; }
+  h1 { font-size: 1.3rem; margin: 8px 0 2px; }
+  h2 { font-size: 0.8rem; margin: 0 0 10px; letter-spacing: .09em; text-transform: uppercase; color: var(--dim); }
+  p.sub { margin: 0 0 16px; color: var(--dim); font-size: .88rem; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 14px; }
+  .stage { position: relative; width: 100%; aspect-ratio: 1 / 1; background: #000; border-radius: 10px; overflow: hidden; }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; background: #000; }
+  .frame-guide {
+    position: absolute; inset: 0; pointer-events: none;
+    outline: 2px dashed rgba(255,255,255,.55); outline-offset: -12px;
+  }
+  .frame-guide::after {
+    content: "central square"; position: absolute; bottom: 14px; left: 0; right: 0;
+    text-align: center; font-size: .7rem; letter-spacing: .08em; text-transform: uppercase;
+    color: rgba(255,255,255,.6);
+  }
+  button, .filelabel {
+    font: inherit; color: var(--ink); background: #24303d; border: 1px solid var(--line);
+    border-radius: 10px; padding: 11px 16px; cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #06210f; font-weight: 650; }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+  input[type=file] { width: .1px; height: .1px; opacity: 0; position: absolute; }
+  .status { font-size: .84rem; color: var(--dim); margin-top: 10px; min-height: 1.2em; }
+  .status.err { color: var(--bad); }
+  .top { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+  .top .name { font-size: 1.7rem; font-weight: 700; }
+  .top .pct { font-size: 1.1rem; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .bar-row { margin-bottom: 10px; }
+  .bar-head { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; font-size: .92rem; }
+  .bar-head .cls { font-weight: 600; }
+  .bar-head .val { color: var(--dim); }
+  .track { height: 9px; background: #0d1319; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin-top: 3px; }
+  .fill { height: 100%; width: 0; background: var(--accent); border-radius: 6px; transition: width .12s linear; }
+  .bar-row:not(.win) .fill { background: #3d6b8a; }
+  .meta { font-size: .78rem; color: var(--dim); margin-top: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: .84rem; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 5px 4px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--dim); font-weight: 600; }
+  .verdict { font-weight: 700; }
+  .verdict.ok { color: var(--accent); }
+  .verdict.no { color: var(--bad); }
+  .qr { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .qr canvas { max-width: 100%; image-rendering: pixelated; background: #fff; border-radius: 8px; padding: 6px; }
+  .qr .link { font-size: .9rem; word-break: break-all; }
+  .qr a { color: var(--accent); }
+  .hint { font-size: .78rem; color: var(--dim); margin-top: 10px; }
+  #shotCanvas, #work { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Leaf classifier</h1>
+  <p class="sub">ONNX (EfficientNet-style, 96&times;96) running on-device via onnxruntime-web. Nothing is uploaded.</p>
+
+  <section>
+    <h2>Camera</h2>
+    <div class="stage">
+      <video id="video" playsinline muted autoplay></video>
+      <div class="frame-guide" id="guide" hidden></div>
+    </div>
+    <div class="row">
+      <button id="startBtn" class="primary">Start rear camera</button>
+      <button id="stopBtn" disabled>Stop</button>
+    </div>
+    <div class="status" id="camStatus">Camera is off.</div>
+    <p class="hint">Point the leaf so it fills the dashed square. The page only ever uses the central square of the frame.</p>
+  </section>
+
+  <section>
+    <h2>Probabilities</h2>
+    <div class="top"><span class="name" id="topName">&mdash;</span><span class="pct" id="topPct"></span></div>
+    <div id="bars"></div>
+    <div class="meta" id="perf"></div>
+  </section>
+
+  <section>
+    <h2>Photo upload (fallback)</h2>
+    <div class="row">
+      <label class="filelabel" for="fileInput">Choose a leaf photo</label>
+      <input type="file" id="fileInput" accept="image/*">
+      <button id="clearBtn" disabled>Clear</button>
+    </div>
+    <div class="stage" id="shotStage" hidden><canvas id="shotCanvas"></canvas></div>
+    <div class="status" id="upStatus">No photo chosen &mdash; the camera results are shown instead.</div>
+  </section>
+
+  <section>
+    <h2>Self-check: check_image.jpg</h2>
+    <div class="status" id="checkStatus">Waiting for the model to load&hellip;</div>
+    <table id="checkTable" hidden>
+      <thead><tr><th>class</th><th>page</th><th>expected</th><th>diff</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Open this page on a phone</h2>
+    <div class="qr">
+      <canvas id="qrCanvas" width="29" height="29" aria-label="QR code for this page"></canvas>
+      <div class="link">
+        Scan the QR code with the phone's camera app, or tap the link:<br>
+        <a id="qrLink" href="#" rel="noopener"></a>
+        <div class="hint">QR generated in your browser by the code in this file &mdash; no external QR service.</div>
+      </div>
+    </div>
+  </section>
+
+  <canvas id="work" width="96" height="96"></canvas>
+</main>
+
+<!-- Version pinned on purpose. The model is ONNX opset 20 with ir_version 10
+     (a torch 2.14 export): onnxruntime-web up to 1.17 refuses ir_version 10, and
+     1.16 fails on it with an opaque emscripten abort. From 1.19 the wasm build is
+     the "threaded" one, but it still initialises single-threaded when
+     SharedArrayBuffer is unavailable - which is the case on GitHub Pages, since
+     Pages cannot send the COOP/COEP headers that SharedArrayBuffer requires.
+     Verified against this exact model with crossOriginIsolated = false. -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.min.js"></script>
+<script>
+"use strict";
+/* ==========================================================================
+   Leaf classifier — plain JS, single file.
+   Preprocessing follows model_info.json exactly:
+     central square crop -> resize to input_size -> RGB /255 -> (x-mean)/std
+     -> CHW float32 tensor of shape 1 x 3 x size x size.
+   The model's output tensor is named "logits" and is NOT softmaxed, so
+   softmax is applied here before probabilities are shown.
+   ========================================================================== */
+
+/* The public GitHub Pages address, encoded in the QR code at the bottom of the
+   page. Left empty it would fall back to the address in the browser's bar, which
+   is wrong when the page is open from a local file or a preview. */
+const PAGE_URL = "https://nesim20.github.io/mlr-ex08/";
+
+const ORT_CDN_WASM = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/";
+/* ?autostart=1 starts the camera on load (used by the automated headless test;
+   a real phone starts it with the button, because iOS needs a user gesture). */
+const AUTOSTART = /[?&]autostart=1(&|$)/.test(location.search);
+
+const els = {
+  video: document.getElementById("video"),
+  guide: document.getElementById("guide"),
+  startBtn: document.getElementById("startBtn"),
+  stopBtn: document.getElementById("stopBtn"),
+  camStatus: document.getElementById("camStatus"),
+  topName: document.getElementById("topName"),
+  topPct: document.getElementById("topPct"),
+  bars: document.getElementById("bars"),
+  perf: document.getElementById("perf"),
+  fileInput: document.getElementById("fileInput"),
+  clearBtn: document.getElementById("clearBtn"),
+  shotStage: document.getElementById("shotStage"),
+  shotCanvas: document.getElementById("shotCanvas"),
+  upStatus: document.getElementById("upStatus"),
+  checkStatus: document.getElementById("checkStatus"),
+  checkTable: document.getElementById("checkTable"),
+  qrCanvas: document.getElementById("qrCanvas"),
+  qrLink: document.getElementById("qrLink"),
+  work: document.getElementById("work"),
+};
+
+/* ---------------------------------------------------------------- state -- */
+let info = null;          // model_info.json
+let session = null;
+let inputName = null;
+let size = 96;
+let workCtx = null;
+let stream = null;        // MediaStream while the camera runs
+let running = false;
+let inferring = false;
+let photoMode = false;    // true = photo uploaded, camera results paused
+let lastFrameMs = 0;
+const MIN_FRAME_MS = 90;  // ~11 fps cap; keeps the phone from cooking itself
+
+/* --------------------------------------------------------------- helpers -- */
+function setStatus(el, msg, isErr) {
+  el.textContent = msg;
+  el.className = "status" + (isErr ? " err" : "");
+}
+
+function softmax(logits) {
+  let max = -Infinity;
+  for (const v of logits) if (v > max) max = v;
+  let sum = 0;
+  const out = logits.map((v) => { const e = Math.exp(v - max); sum += e; return e; });
+  return out.map((e) => e / sum);
+}
+
+/* Central square of `src` (native pixels), resized into the 96x96 work
+   canvas, then converted to a CHW float32 tensor normalised with mean/std. */
+function tensorFrom(src, srcW, srcH) {
+  const side = Math.min(srcW, srcH);
+  const sx = Math.round((srcW - side) / 2);
+  const sy = Math.round((srcH - side) / 2);
+  workCtx.imageSmoothingEnabled = true;
+  workCtx.imageSmoothingQuality = "high";
+  workCtx.clearRect(0, 0, size, size);
+  workCtx.drawImage(src, sx, sy, side, side, 0, 0, size, size);
+  const rgba = workCtx.getImageData(0, 0, size, size).data;
+
+  const [mR, mG, mB] = info.mean;
+  const [sR, sG, sB] = info.std;
+  const plane = size * size;
+  const t = new Float32Array(3 * plane);
+  for (let i = 0, p = 0; p < plane; p++, i += 4) {
+    t[p]             = (rgba[i]     / 255 - mR) / sR;
+    t[plane + p]     = (rgba[i + 1] / 255 - mG) / sG;
+    t[2 * plane + p] = (rgba[i + 2] / 255 - mB) / sB;
+  }
+  return t;
+}
+
+async function runInference(data) {
+  const feeds = {};
+  feeds[inputName] = new ort.Tensor("float32", data, [1, 3, size, size]);
+  const results = await session.run(feeds);
+  const out = results[session.outputNames[0]];
+  return softmax(Array.prototype.slice.call(out.data));
+}
+
+/* ------------------------------------------------------------ results UI -- */
+let bars = [];
+function buildBars() {
+  els.bars.textContent = "";
+  bars = info.classes.map((name) => {
+    const row = document.createElement("div");
+    row.className = "bar-row";
+    const head = document.createElement("div");
+    head.className = "bar-head";
+    const cls = document.createElement("span");
+    cls.className = "cls";
+    cls.textContent = name;
+    const val = document.createElement("span");
+    val.className = "val";
+    val.textContent = "—";
+    head.append(cls, val);
+    const track = document.createElement("div");
+    track.className = "track";
+    const fill = document.createElement("div");
+    fill.className = "fill";
+    track.appendChild(fill);
+    row.append(head, track);
+    els.bars.appendChild(row);
+    return { row, val, fill };
+  });
+}
+
+function renderProbs(probs, msSinceFrame) {
+  const order = probs.map((p, i) => ({ p, i })).sort((a, b) => b.p - a.p);
+  const win = order[0];
+  els.topName.textContent = info.classes[win.i];
+  els.topPct.textContent = (win.p > 0.9995 ? (win.p * 100).toFixed(3)
+                                           : (win.p * 100).toFixed(1)) + "%";
+  order.forEach((o, rank) => {
+    const b = bars[o.i];
+    b.val.textContent = o.p < 0.0001 ? o.p.toExponential(1)
+      : (o.p > 0.999 ? (o.p * 100).toFixed(3) : (o.p * 100).toFixed(2)) + "%";
+    b.fill.style.width = (o.p * 100).toFixed(2) + "%";
+    b.row.classList.toggle("win", rank === 0);
+    // keep the visual list sorted by probability, strongest first
+    els.bars.appendChild(b.row);
+  });
+  if (msSinceFrame != null) {
+    els.perf.textContent = info.classes.length + " classes · " + size + "×" + size +
+      " central crop · last inference " + Math.round(msSinceFrame) + " ms" +
+      (photoMode ? " · photo" : " · live");
+  }
+}
+
+/* ---------------------------------------------------------------- model -- */
+async function loadModel() {
+  info = await (await fetch("model_info.json", { cache: "default" })).json();
+  size = info.input_size;
+  els.work.width = size;
+  els.work.height = size;
+  workCtx = els.work.getContext("2d", { willReadFrequently: true });
+  buildBars();
+  setStatus(els.checkStatus, "Downloading model (6.3 MB)…");
+
+  ort.env.wasm.wasmPaths = ORT_CDN_WASM;
+  ort.env.wasm.numThreads = 1;   // GitHub Pages sends no COOP/COEP headers, so
+  ort.env.wasm.proxy = false;    // SharedArrayBuffer is unavailable → 1 thread.
+  const resp = await fetch("leaf_model.onnx", { cache: "default" });
+  if (!resp.ok) throw new Error("leaf_model.onnx: HTTP " + resp.status);
+  const buf = await resp.arrayBuffer();
+  session = await ort.InferenceSession.create(buf, {
+    executionProviders: ["wasm"], graphOptimizationLevel: "all",
+  });
+  inputName = session.inputNames[0];
+  return session;
+}
+
+/* --------------------------------------------------------------- camera -- */
+function pickConstraints() {
+  return [
+    { audio: false, video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } } },
+    { audio: false, video: { facingMode: { ideal: "environment" } } },
+    { audio: false, video: true },
+  ];
+}
+
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setStatus(els.camStatus,
+      "This browser has no camera API (getUserMedia). Use the photo upload below — " +
+      "the camera needs HTTPS.", true);
+    return false;
+  }
+  let lastErr = null;
+  for (const c of pickConstraints()) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(c);
+      lastErr = null;
+      break;
+    } catch (e) { lastErr = e; }
+  }
+  if (lastErr) {
+    setStatus(els.camStatus, "Camera unavailable: " + lastErr.name + ". " +
+      "Allow camera access, or use the photo upload below.", true);
+    return false;
+  }
+
+  els.video.srcObject = stream;
+  try { await els.video.play(); } catch (e) { /* autoplay policy; already playing on iOS */ }
+  await new Promise((res) => {
+    if (els.video.videoWidth) return res();
+    els.video.addEventListener("loadedmetadata", res, { once: true });
+  });
+
+  const t = stream.getVideoTracks()[0];
+  const s = t.getSettings ? t.getSettings() : {};
+  setStatus(els.camStatus, "Live · " + els.video.videoWidth + "×" + els.video.videoHeight +
+    (s.facingMode ? " · " + s.facingMode + " camera" : ""));
+  els.guide.hidden = false;
+  els.startBtn.disabled = true;
+  els.stopBtn.disabled = false;
+  running = true;
+  requestAnimationFrame(cameraLoop);
+  return true;
+}
+
+function stopCamera() {
+  running = false;
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  els.video.srcObject = null;
+  els.guide.hidden = true;
+  els.startBtn.disabled = false;
+  els.stopBtn.disabled = true;
+  setStatus(els.camStatus, "Camera is off.");
+}
+
+async function cameraLoop() {
+  if (!running) return;
+  if (!inferring && !photoMode && session && els.video.videoWidth > 0 &&
+      els.video.readyState >= 2) {
+    inferring = true;
+    const t0 = performance.now();
+    try {
+      const data = tensorFrom(els.video, els.video.videoWidth, els.video.videoHeight);
+      const probs = await runInference(data);
+      renderProbs(probs, performance.now() - t0);
+    } catch (e) {
+      setStatus(els.camStatus, "Inference failed: " + (e && e.message ? e.message : e), true);
+      running = false;
+    }
+    inferring = false;
+    lastFrameMs = performance.now();
+  }
+  if (running) {
+    const wait = Math.max(0, MIN_FRAME_MS - (performance.now() - lastFrameMs));
+    if (wait > 0) setTimeout(() => requestAnimationFrame(cameraLoop), wait);
+    else requestAnimationFrame(cameraLoop);
+  }
+}
+
+/* --------------------------------------------------------------- upload -- */
+function loadImageSource(file) {
+  if (window.createImageBitmap) {
+    return createImageBitmap(file).catch(() => loadViaImg(file));
+  }
+  return loadViaImg(file);
+}
+function loadViaImg(file) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file);
+    const im = new Image();
+    im.onload = () => { res(im); };
+    im.onerror = () => { URL.revokeObjectURL(url); rej(new Error("could not decode " + file.name)); };
+    im.src = url;
+  });
+}
+
+async function handleFile(file) {
+  if (!session || !file) return;
+  setStatus(els.upStatus, "Reading " + file.name + "…");
+  let src;
+  try {
+    src = await loadImageSource(file);
+  } catch (e) {
+    setStatus(els.upStatus, e.message, true);
+    return;
+  }
+  const w = src.naturalWidth || src.width, h = src.naturalHeight || src.height;
+
+  photoMode = true;
+  els.shotStage.hidden = false;
+  const thumb = els.shotCanvas;
+  const scale = Math.min(1, 320 / Math.max(w, h));
+  thumb.width = Math.max(1, Math.round(w * scale));
+  thumb.height = Math.max(1, Math.round(h * scale));
+  thumb.style.width = "100%";
+  thumb.style.height = "100%";
+  thumb.style.objectFit = "contain";
+  thumb.getContext("2d").drawImage(src, 0, 0, thumb.width, thumb.height);
+  els.clearBtn.disabled = false;
+
+  const t0 = performance.now();
+  const probs = await runInference(tensorFrom(src, w, h));
+  renderProbs(probs, performance.now() - t0);
+  setStatus(els.upStatus, file.name + " · " + w + "×" + h +
+    " · classified from its central square. Press Clear to go back to the live camera.");
+}
+
+els.fileInput.addEventListener("change", (ev) => {
+  const f = ev.target.files && ev.target.files[0];
+  if (f) handleFile(f);
+});
+els.clearBtn.addEventListener("click", () => {
+  photoMode = false;
+  els.fileInput.value = "";
+  els.clearBtn.disabled = true;
+  els.shotStage.hidden = true;
+  setStatus(els.upStatus, "No photo chosen — the camera results are shown instead.");
+});
+
+/* ----------------------------------------------------------- self-check -- */
+async function selfCheck() {
+  let img, expected;
+  try {
+    expected = await (await fetch("check_expected.json")).json();
+  } catch (e) {
+    setStatus(els.checkStatus, "check_expected.json is missing.", true);
+    return;
+  }
+  try {
+    const blob = await (await fetch("check_image.jpg")).blob();
+    img = await loadImageSource(new File([blob], "check_image.jpg", { type: "image/jpeg" }));
+  } catch (e) {
+    setStatus(els.checkStatus, "check_image.jpg is missing or undecodable.", true);
+    return;
+  }
+  const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+  const probs = await runInference(tensorFrom(img, w, h));
+
+  const body = els.checkTable.querySelector("tbody");
+  body.textContent = "";
+  let maxDiff = 0, maxRel = 0;
+  info.classes.forEach((name, i) => {
+    const got = probs[i], exp = expected[name];
+    const diff = Math.abs(got - exp);
+    const rel = diff / Math.max(exp, 1e-12);
+    maxDiff = Math.max(maxDiff, diff);
+    maxRel = Math.max(maxRel, rel);
+    const tr = document.createElement("tr");
+    [name, fmtP(got), fmtP(exp), diff.toExponential(1)].forEach((txt, k) => {
+      const td = document.createElement("td");
+      td.textContent = txt;
+      if (k === 3 && diff > 1e-4) td.style.color = "var(--warn)";
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+  els.checkTable.hidden = false;
+
+  const topIdx = probs.indexOf(Math.max.apply(null, probs));
+  const expTop = info.classes.indexOf(Object.keys(expected).reduce(
+    (a, b) => (expected[a] > expected[b] ? a : b)));
+  const ok = maxDiff < 1e-4 && topIdx === expTop;
+  const verdict = ok ? "PASS" : "FAIL";
+  els.checkStatus.innerHTML = '<span class="verdict ' + (ok ? "ok" : "no") + '">' + verdict +
+    "</span> — max absolute difference " + maxDiff.toExponential(2) +
+    " (tolerance 1e-4), top class “" + info.classes[topIdx] + "” as expected.";
+}
+function fmtP(p) { return p < 1e-4 ? p.toExponential(3) : p.toFixed(6); }
+
+/* ============================================================ QR encoder ==
+   Byte-mode QR (ISO/IEC 18004), versions 1-9, error-correction level M with
+   a level-L fallback for long URLs. Written for this page so the code is
+   generated in the browser — no external QR service is contacted.
+   ======================================================================== */
+const QR = (function () {
+  // level -> version -> [EC codewords per block, [[blockCount, dataCodewords], ...]]
+  const TBL = {
+    M: { 1: [10, [[1, 16]]], 2: [16, [[1, 28]]], 3: [26, [[1, 44]]], 4: [18, [[2, 32]]],
+         5: [24, [[2, 43]]], 6: [16, [[4, 27]]], 7: [18, [[4, 31]]],
+         8: [22, [[2, 38], [2, 39]]], 9: [22, [[3, 36], [2, 37]]] },
+    L: { 1: [7, [[1, 19]]], 2: [10, [[1, 34]]], 3: [15, [[1, 55]]], 4: [20, [[1, 80]]],
+         5: [26, [[1, 108]]], 6: [18, [[2, 68]]], 7: [20, [[2, 78]]],
+         8: [24, [[2, 97]]], 9: [30, [[2, 116]]] },
+  };
+  const ALIGN = { 1: [], 2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30], 6: [6, 34],
+                  7: [6, 22, 38], 8: [6, 24, 42], 9: [6, 26, 46] };
+  const FMT_BITS = { M: 0, L: 1 };
+
+  // GF(256) tables, primitive polynomial 0x11D
+  const EXP = new Uint8Array(512), LOG = new Uint8Array(256);
+  (function () {
+    let x = 1;
+    for (let i = 0; i < 255; i++) { EXP[i] = x; LOG[x] = i; x <<= 1; if (x & 0x100) x ^= 0x11D; }
+    for (let i = 255; i < 512; i++) EXP[i] = EXP[i - 255];
+  })();
+  const gmul = (a, b) => (a === 0 || b === 0 ? 0 : EXP[LOG[a] + LOG[b]]);
+
+  function genPoly(deg) {
+    let g = [1];
+    for (let i = 0; i < deg; i++) {
+      const n = new Array(g.length + 1).fill(0);
+      for (let j = 0; j < g.length; j++) { n[j] ^= g[j]; n[j + 1] ^= gmul(g[j], EXP[i]); }
+      g = n;
+    }
+    return g;
+  }
+  /* Remainder of data(x)·x^ecLen mod g(x) — the EC codewords. The buffer is
+     `data` followed by ecLen zero bytes, and only the `data.length` leading
+     positions are reduced; j starts at 1 because the leading generator
+     coefficient is 1, which just zeroes the position we read `c` from. */
+  function ecOf(data, ecLen) {
+    const g = genPoly(ecLen);
+    const buf = new Uint8Array(data.length + ecLen);
+    buf.set(data);
+    for (let i = 0; i < data.length; i++) {
+      const c = buf[i];
+      if (c !== 0) for (let j = 1; j < g.length; j++) buf[i + j] ^= gmul(g[j], c);
+    }
+    return buf.subarray(data.length);
+  }
+
+  function pickVersion(len, level) {
+    for (let v = 1; v <= 9; v++) {
+      const cap = TBL[level][v][1].reduce((s, b) => s + b[0] * b[1], 0);
+      if (4 + 8 + 8 * len <= cap * 8) return v;          // mode + count + data bits
+    }
+    return null;
+  }
+
+  function codewords(bytes, version, level) {
+    const spec = TBL[level][version];
+    const ecPer = spec[0], groups = spec[1];
+    const total = groups.reduce((s, g) => s + g[0] * g[1], 0);
+
+    const bits = [];
+    const push = (val, n) => { for (let i = n - 1; i >= 0; i--) bits.push((val >>> i) & 1); };
+    push(4, 4);                       // 0100 = byte mode
+    push(bytes.length, 8);            // versions 1-9: 8-bit byte count
+    for (const b of bytes) push(b, 8);
+    const cap = total * 8;
+    for (let i = 0; i < 4 && bits.length < cap; i++) bits.push(0);   // terminator
+    while (bits.length % 8 !== 0) bits.push(0);
+    const data = [];
+    for (let i = 0; i < bits.length; i += 8) {
+      data.push(bits.slice(i, i + 8).reduce((a, b) => (a << 1) | b, 0));
+    }
+    const PAD = [0xEC, 0x11];
+    for (let k = 0; data.length < total; k++) data.push(PAD[k % 2]);
+
+    // split into blocks, compute EC, then interleave
+    const blocks = [], ecs = [];
+    let at = 0;
+    for (const [count, len] of groups) {
+      for (let b = 0; b < count; b++) {
+        const d = Uint8Array.from(data.slice(at, at + len));
+        at += len;
+        blocks.push(d);
+        ecs.push(ecOf(d, ecPer));
+      }
+    }
+    const out = [];
+    const maxD = Math.max.apply(null, blocks.map((b) => b.length));
+    for (let i = 0; i < maxD; i++) for (const b of blocks) if (i < b.length) out.push(b[i]);
+    for (let i = 0; i < ecPer; i++) for (const e of ecs) out.push(e[i]);
+    // Any leftover capacity is remainder bits, not codewords: the placement
+    // loop stops when these codewords run out and leaves those modules light.
+    return out;
+  }
+
+  function matrix(version, level, mask, data) {
+    const n = version * 4 + 17;
+    const mod = Array.from({ length: n }, () => new Uint8Array(n));
+    const fn = Array.from({ length: n }, () => new Uint8Array(n));
+    const set = (x, y, v) => { if (x >= 0 && y >= 0 && x < n && y < n) { mod[y][x] = v ? 1 : 0; fn[y][x] = 1; } };
+
+    // finder patterns + separators
+    for (const [ox, oy] of [[0, 0], [n - 7, 0], [0, n - 7]]) {
+      for (let dy = -1; dy <= 7; dy++) {
+        for (let dx = -1; dx <= 7; dx++) {
+          const inBox = dx >= 0 && dx <= 6 && dy >= 0 && dy <= 6;
+          const ring = inBox && (dx === 0 || dx === 6 || dy === 0 || dy === 6);
+          const core = dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4;
+          set(ox + dx, oy + dy, inBox && (ring || core));
+        }
+      }
+    }
+    // timing patterns
+    for (let i = 8; i < n - 8; i++) { set(6, i, i % 2 === 0); set(i, 6, i % 2 === 0); }
+    // alignment patterns
+    const c = ALIGN[version];
+    for (const ay of c) for (const ax of c) {
+      const corner = (ax === c[0] && ay === c[0]) || (ax === c[0] && ay === c[c.length - 1]) ||
+                     (ax === c[c.length - 1] && ay === c[0]);
+      if (corner) continue;
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          set(ax + dx, ay + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+        }
+      }
+    }
+    // format-information areas (filled after masking) + dark module
+    for (let i = 0; i <= 8; i++) {
+      if (i !== 6) { set(8, i, 0); set(i, 8, 0); }
+    }
+    for (let i = 0; i < 8; i++) { set(n - 1 - i, 8, 0); set(8, n - 1 - i, 0); }
+    set(8, n - 8, 1);
+    // version information (versions 7+)
+    if (version >= 7) {
+      let rem = version;
+      for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1F25);
+      const vbits = (version << 12) | rem;
+      for (let i = 0; i < 18; i++) {
+        const b = (vbits >>> i) & 1;
+        set((i % 3) + n - 11, Math.floor(i / 3), b);
+        set(Math.floor(i / 3), (i % 3) + n - 11, b);
+      }
+    }
+
+    // data placement: 2-module-wide zigzag, right to left, skipping column 6
+    let bit = 0;
+    for (let right = n - 1; right >= 1; right -= 2) {
+      if (right === 6) right = 5;
+      for (let vert = 0; vert < n; vert++) {
+        for (let j = 0; j < 2; j++) {
+          const x = right - j;
+          const upward = ((right + 1) & 2) === 0;
+          const y = upward ? n - 1 - vert : vert;
+          if (!fn[y][x] && bit < data.length * 8) {
+            mod[y][x] = (data[bit >>> 3] >>> (7 - (bit & 7))) & 1;
+            bit++;
+          }
+        }
+      }
+    }
+
+    // masking + format bits
+    const maskFn = [
+      (x, y) => (x + y) % 2 === 0,
+      (x, y) => y % 2 === 0,
+      (x, y) => x % 3 === 0,
+      (x, y) => (x + y) % 3 === 0,
+      (x, y) => (Math.floor(x / 2) + Math.floor(y / 3)) % 2 === 0,
+      (x, y) => (x * y) % 2 + (x * y) % 3 === 0,
+      (x, y) => ((x * y) % 2 + (x * y) % 3) % 2 === 0,
+      (x, y) => ((x + y) % 2 + (x * y) % 3) % 2 === 0,
+    ][mask];
+
+    const copy = mod.map((r) => Uint8Array.from(r));
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      if (!fn[y][x] && maskFn(x, y)) copy[y][x] ^= 1;
+    }
+    let fdata = (FMT_BITS[level] << 3) | mask;
+    let rem = fdata;
+    for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+    const fbits = ((fdata << 10) | rem) ^ 0x5412;
+    const gb = (i) => (fbits >>> i) & 1;
+    for (let i = 0; i <= 5; i++) copy[i][8] = gb(i);
+    copy[7][8] = gb(6);
+    copy[8][8] = gb(7);
+    copy[8][7] = gb(8);
+    for (let i = 9; i < 15; i++) copy[8][14 - i] = gb(i);
+    for (let i = 0; i < 8; i++) copy[8][n - 1 - i] = gb(i);
+    for (let i = 8; i < 15; i++) copy[n - 15 + i][8] = gb(i);
+    copy[n - 8][8] = 1;
+    return copy;
+  }
+
+  function penalty(m) {
+    const n = m.length;
+    let score = 0;
+    const runs = (get) => {
+      let s = 0;
+      for (let a = 0; a < n; a++) {
+        let len = 1;
+        for (let b = 1; b <= n; b++) {
+          if (b < n && get(a, b) === get(a, b - 1)) len++;
+          else { if (len >= 5) s += 3 + (len - 5); len = 1; }
+        }
+      }
+      return s;
+    };
+    score += runs((a, b) => m[a][b]) + runs((a, b) => m[b][a]);        // rule 1
+    for (let y = 0; y < n - 1; y++) for (let x = 0; x < n - 1; x++) {  // rule 2
+      const v = m[y][x];
+      if (v === m[y][x + 1] && v === m[y + 1][x] && v === m[y + 1][x + 1]) score += 3;
+    }
+    // rule 3: finder-like pattern with four light modules on either side,
+    // searched in both directions, in every row and every column
+    const PAT = [1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0];
+    const PAT_REV = PAT.slice().reverse();
+    const has = (get, a, b, pat) => {
+      for (let k = 0; k < 11; k++) if (get(a, b + k) !== pat[k]) return false;
+      return true;
+    };
+    for (let a = 0; a < n; a++) {
+      for (let b = 0; b + 11 <= n; b++) {
+        const row = (x, y) => m[x][y], col = (x, y) => m[y][x];
+        if (has(row, a, b, PAT) || has(row, a, b, PAT_REV) ||
+            has(col, a, b, PAT) || has(col, a, b, PAT_REV)) score += 40;
+      }
+    }
+    let dark = 0;                                                      // rule 4
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) dark += m[y][x];
+    const pct = (dark * 100) / (n * n);
+    score += Math.floor(Math.abs(pct - 50) / 5) * 10;
+    return score;
+  }
+
+  return {
+    /* Best (lowest-penalty) masked matrix for `text`. */
+    encode(text) {
+      const bytes = (typeof TextEncoder !== "undefined")
+        ? new TextEncoder().encode(text)
+        : Uint8Array.from(text.split("").map((c) => c.charCodeAt(0) & 0xff));
+      let level = "M", version = pickVersion(bytes.length, "M");
+      if (version === null) { level = "L"; version = pickVersion(bytes.length, "L"); }
+      if (version === null) throw new Error("QR: text too long for versions 1-9");
+      const data = codewords(bytes, version, level);
+      let best = null, bestScore = Infinity;
+      for (let mask = 0; mask < 8; mask++) {
+        const m = matrix(version, level, mask, data);
+        const s = penalty(m);
+        if (s < bestScore) { bestScore = s; best = m; }
+      }
+      return { size: version * 4 + 17, modules: best, version: version, level: level };
+    },
+  };
+})();
+
+/* Draws the code at the screen's real pixel density: a module is a whole
+   number of device pixels, so it stays crisp on a phone retina display
+   instead of relying on `image-rendering: pixelated`, which older Safari
+   ignores and which would leave soft, harder-to-scan edges. */
+function drawQR(canvas, text) {
+  const quiet = 4;
+  const qr = QR.encode(text);
+  const n = qr.size;
+  const cssPx = n + quiet * 2;          // modules incl. quiet zone, in CSS px
+  const perModule = 6;
+  const dpr = Math.min(3, window.devicePixelRatio || 1);
+  const scale = perModule * dpr;
+  canvas.width = Math.round(cssPx * scale);
+  canvas.height = Math.round(cssPx * scale);
+  canvas.style.width = cssPx * perModule + "px";
+  canvas.style.height = cssPx * perModule + "px";
+  const g = canvas.getContext("2d");
+  g.imageSmoothingEnabled = false;
+  g.fillStyle = "#fff";
+  g.fillRect(0, 0, canvas.width, canvas.height);
+  g.fillStyle = "#000";
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      if (qr.modules[y][x]) {
+        g.fillRect(Math.round((x + quiet) * scale), Math.round((y + quiet) * scale),
+                   Math.ceil(scale), Math.ceil(scale));
+      }
+    }
+  }
+  return qr;
+}
+
+/* -------------------------------------------------------------- wiring -- */
+els.startBtn.addEventListener("click", () => { els.startBtn.disabled = true; startCamera(); });
+els.stopBtn.addEventListener("click", stopCamera);
+document.addEventListener("visibilitychange", () => { if (document.hidden && running) stopCamera(); });
+
+function initQr() {
+  const url = PAGE_URL || location.href.split("?")[0].split("#")[0];
+  try {
+    drawQR(els.qrCanvas, url);
+  } catch (e) {
+    els.qrCanvas.hidden = true;
+    setStatus(els.qrLink, "QR could not be generated: " + e.message, true);
+    return;
+  }
+  els.qrLink.textContent = url;
+  els.qrLink.href = url;
+}
+
+(async function init() {
+  initQr();
+  try {
+    await loadModel();
+    setStatus(els.checkStatus, "Model ready — running check_image.jpg…");
+    await selfCheck();
+    if (AUTOSTART) { els.startBtn.disabled = true; await startCamera(); }
+    else setStatus(els.camStatus, "Model ready. Press “Start rear camera”.");
+  } catch (e) {
+    // Full detail goes to the console and the status line: a model that will not
+    // load is usually a blocked CDN or an unsupported browser, and the raw
+    // message is what tells those two apart.
+    console.error("model load failed", e);
+    const where = e && e.stack ? String(e.stack).split("\n")[1] : "";
+    setStatus(els.checkStatus, "Failed to load the model: " +
+      (e && e.message ? e.message : String(e)) + (where ? "  [" + where.trim() + "]" : ""), true);
+    setStatus(els.camStatus, "Model failed to load, so the camera is disabled.", true);
+  }
+})();
+</script>
+</body>
+</html>
